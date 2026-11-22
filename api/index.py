@@ -18,8 +18,24 @@ ADMIN_IDS = {
 }
 
 # База данных Upstash Redis (подключается через Vercel Storage)
-REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL") or os.environ.get("KV_REST_API_URL")
-REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN") or os.environ.get("KV_REST_API_TOKEN")
+def _find_env(suffixes, exclude=("READ_ONLY",)):
+    """Ищет переменную по окончанию имени (подходит при любом префиксе Vercel)."""
+    for key, value in os.environ.items():
+        if value and key.endswith(suffixes) and not any(x in key for x in exclude):
+            return value
+    return None
+
+
+REDIS_URL = (
+    os.environ.get("UPSTASH_REDIS_REST_URL")
+    or os.environ.get("KV_REST_API_URL")
+    or _find_env(("REST_API_URL", "REST_URL"))
+)
+REDIS_TOKEN = (
+    os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    or os.environ.get("KV_REST_API_TOKEN")
+    or _find_env(("REST_API_TOKEN", "REST_TOKEN"))
+)
 
 TG = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BOT_ID = int(BOT_TOKEN.split(":")[0])
@@ -806,4 +822,4 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"bot is running")
+        self.wfile.write(b"bot is running")ite(b"bot 
