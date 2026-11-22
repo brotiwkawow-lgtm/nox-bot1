@@ -17,7 +17,7 @@ ADMIN_IDS = {
     int(x) for x in os.environ.get("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()
 }
 
-# База данных Upstash Redis (подключается через Vercel Storage)
+
 def _find_env(suffixes, exclude=("READ_ONLY",)):
     """Ищет переменную по окончанию имени (подходит при любом префиксе Vercel)."""
     for key, value in os.environ.items():
@@ -26,6 +26,7 @@ def _find_env(suffixes, exclude=("READ_ONLY",)):
     return None
 
 
+# База данных Upstash Redis (подключается через Vercel Storage)
 REDIS_URL = (
     os.environ.get("UPSTASH_REDIS_REST_URL")
     or os.environ.get("KV_REST_API_URL")
@@ -61,7 +62,22 @@ STATUS_TEXT = {
     "creator": "👑 владелец",
 }
 
-FIELD_NAMES = {"name": "название", "price": "цену", "desc": "описание", "photo": "фото"}
+# Тексты кнопок возле клавиатуры
+BTN_CH = "📊 Мои каналы"
+BTN_REF = "🎁 Рефералы и награды"
+BTN_ACC = "👤 Мой аккаунт"
+BTN_SUP = "🛟 Поддержка"
+BTN_TOP = "💰 Пополнение"
+BTN_AI = "🤖 Нейрочат"
+BTN_ADM = "⚙️ Админка"
+BUILTIN_BUTTONS = {BTN_CH, BTN_REF, BTN_ACC, BTN_SUP, BTN_TOP, BTN_AI, BTN_ADM}
+
+# (сколько рефералов нужно, награда)
+REWARDS = [
+    (10, "Фул 6 с МК ВК"),
+    (50, "Золотой фул 6 с МК ВК"),
+    (100, "Сопровождение на 8 карту"),
+]
 
 
 # ---------- Вспомогательные функции ----------
@@ -112,14 +128,6 @@ def save_channels(user_id, channels):
     save_json(f"ch:{user_id}", channels)
 
 
-def get_catalog():
-    return load_json("catalog", [])
-
-
-def save_catalog(items):
-    save_json("catalog", items)
-
-
 def get_buttons():
     return load_json("buttons", [])
 
@@ -129,40 +137,10 @@ def save_buttons(items):
 
 
 def track_user(user_id):
+    """Запоминает пользователя. Возвращает True, если он зашёл в бота впервые."""
     if REDIS_URL:
-        redis("SADD", "users", user_id)
-
-
-def broadcast(from_chat, mid):
-    """Копирует сообщение админа всем пользователям. Возвращает (отправлено, ошибок, пропущено)."""
-    users = redis("SMEMBERS", "users") or []
-    deadline = time.time() + 50
-
-    def one(uid):
-        if time.time() > deadline:
-            return None
-        for _ in range(2):
-            r = tg("copyMessage", chat_id=int(uid), from_chat_id=from_chat, message_id=mid)
-            if r.get("ok"):
-                return True
-            if r.get("error_code") == 429:
-                time.sleep(min(r.get("parameters", {}).get("retry_after", 1), 5))
-                continue
-            if r.get("error_code") in (400, 403):
-                redis("SREM", "users", uid)  # пользователь заблокировал бота
-            return False
-        return False
-
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        results = list(ex.map(one, users))
-    return results.count(True), results.count(False), results.count(None)
-
-
-def find_product(pid):
-    for p in get_catalog():
-        if str(p["id"]) == str(pid):
-            return p
-    return None
+        return redis("SADD", "users", user_id) == 1
+    return False
 
 
 def set_state(user_id, value, ttl=600):
@@ -209,22 +187,18 @@ def sub_keyboard():
 
 
 def menu_keyboard(user_id):
-    rows = [
-        [{"text": "🛍 Каталог", "callback_data": "cat"}],
-        [{"text": "📊 Мои каналы", "callback_data": "mych"}],
-        [{"text": "👤 Мой аккаунт", "callback_data": "account"}],
-        [{"text": "🛟 Поддержка", "callback_data": "support"}],
-        [{"text": "💰 Пополнение", "callback_data": "topup"}],
-        [{"text": "🤖 Нейрочат", "callback_data": "ai"}],
-    ]
-    for b in get_buttons():
-        if b["kind"] == "url":
-            rows.append([{"text": b["name"], "url": b["value"]}])
-        else:
-            rows.append([{"text": b["name"], "callback_data": f"b:{b['id']}"}])
+    """Постоянная клавиатура с кнопками возле поля ввода."""
+    labels = [BTN_CH, BTN_REF, BTN_ACC, BTN_SUP, BTN_TOP, BTN_AI]
+    labels += [b["name"] for b in get_buttons()]
+    rows = [[{"text": t} for t in labels[i:i + 2]] for i in range(0, len(labels), 2)]
     if is_admin(user_id):
-        rows.append([{"text": "⚙️ Админка", "callback_data": "adm"}])
-    return {"inline_keyboard": rows}
+        rows.append([{"text": BTN_ADM}])
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "input_field_placeholder": "Выбери кнопку или напиши вопрос",
+    }
 
 
 def back_keyboard(target="menu", label="⬅️ Назад"):
@@ -233,14 +207,7 @@ def back_keyboard(target="menu", label="⬅️ Назад"):
 
 # ---------- Отправка / редактирование ----------
 
-def send(chat_id, text, kb=None, html_mode=False, photo=None):
-    if photo:
-        payload = dict(chat_id=chat_id, photo=photo, caption=text[:1000])
-        if html_mode:
-            payload["parse_mode"] = "HTML"
-        if kb:
-            payload["reply_markup"] = kb
-        return tg("sendPhoto", **payload)
+def send(chat_id, text, kb=None, html_mode=False):
     payload = dict(chat_id=chat_id, text=text, disable_web_page_preview=True)
     if html_mode:
         payload["parse_mode"] = "HTML"
@@ -249,17 +216,10 @@ def send(chat_id, text, kb=None, html_mode=False, photo=None):
     return tg("sendMessage", **payload)
 
 
-def edit(cbm, text, kb=None, html_mode=False, photo=None):
-    """Меняет сообщение с кнопкой. Если нужно фото или старое сообщение с фото,
-    удаляет его и отправляет новое."""
-    chat_id = cbm["chat"]["id"]
-    message_id = cbm["message_id"]
-    if photo or "photo" in cbm:
-        tg("deleteMessage", chat_id=chat_id, message_id=message_id)
-        return send(chat_id, text, kb, html_mode, photo)
+def edit(cbm, text, kb=None, html_mode=False):
     payload = dict(
-        chat_id=chat_id,
-        message_id=message_id,
+        chat_id=cbm["chat"]["id"],
+        message_id=cbm["message_id"],
         text=text,
         disable_web_page_preview=True,
     )
@@ -270,42 +230,12 @@ def edit(cbm, text, kb=None, html_mode=False, photo=None):
     return tg("editMessageText", **payload)
 
 
-def show_menu(chat_id, user_id, cbm=None):
-    text = "Главное меню 👇"
-    kb = menu_keyboard(user_id)
-    if cbm:
-        edit(cbm, text, kb)
-    else:
-        send(chat_id, text, kb)
+def show_menu(chat_id, user_id):
+    send(chat_id, "Главное меню 👇", menu_keyboard(user_id))
 
 
-# ---------- Каталог ----------
-
-def catalog_screen():
-    items = get_catalog()
-    if not REDIS_URL:
-        return "⚠️ База данных не подключена.", back_keyboard()
-    if not items:
-        return "🛍 <b>Каталог</b>\n\nПока пусто, загляни позже.", back_keyboard()
-    rows = [
-        [{"text": f"{p['name']} — {p['price']}"[:60], "callback_data": f"p:{p['id']}"}]
-        for p in items
-    ]
-    rows.append([{"text": "⬅️ Назад", "callback_data": "menu"}])
-    return "🛍 <b>Каталог</b>\n\nВыбери товар:", {"inline_keyboard": rows}
-
-
-def product_screen(p):
-    text = f"<b>{esc(p['name'])}</b>\n💰 {esc(p['price'])}"
-    if p.get("desc"):
-        text += f"\n\n{esc(p['desc'])}"
-    kb = {
-        "inline_keyboard": [
-            [{"text": "💳 Купить", "url": f"https://t.me/{SUPPORT_USERNAME}"}],
-            [{"text": "⬅️ К каталогу", "callback_data": "cat"}],
-        ]
-    }
-    return text, kb
+def send_sub_request(chat_id):
+    send(chat_id, "Чтобы пользоваться ботом, подпишись на все каналы 👇", sub_keyboard())
 
 
 # ---------- Админка ----------
@@ -313,9 +243,6 @@ def product_screen(p):
 def admin_menu():
     kb = {
         "inline_keyboard": [
-            [{"text": "➕ Добавить товар", "callback_data": "adm_add"}],
-            [{"text": "✏️ Изменить товар", "callback_data": "adm_edit"}],
-            [{"text": "🗑 Удалить товар", "callback_data": "adm_del"}],
             [{"text": "📢 Рассылка всем", "callback_data": "adm_bc"}],
             [{"text": "🔘 Кнопки меню", "callback_data": "adm_btn"}],
             [{"text": "📈 Статистика бота", "callback_data": "adm_stats"}],
@@ -325,32 +252,38 @@ def admin_menu():
     return "⚙️ <b>Админка</b>\n\nВыбери действие:", kb
 
 
-def product_picker(prefix, title):
-    items = get_catalog()
-    if not items:
-        return "Каталог пуст.", back_keyboard("adm")
-    rows = [
-        [{"text": f"{p['name']} — {p['price']}"[:60], "callback_data": f"{prefix}:{p['id']}"}]
-        for p in items
-    ]
-    rows.append([{"text": "⬅️ Назад", "callback_data": "adm"}])
-    return title, {"inline_keyboard": rows}
+def broadcast(from_chat, mid):
+    """Копирует сообщение админа всем пользователям. Возвращает (отправлено, ошибок, пропущено)."""
+    users = redis("SMEMBERS", "users") or []
+    deadline = time.time() + 50
+
+    def one(uid):
+        if time.time() > deadline:
+            return None
+        for _ in range(2):
+            r = tg("copyMessage", chat_id=int(uid), from_chat_id=from_chat, message_id=mid)
+            if r.get("ok"):
+                return True
+            if r.get("error_code") == 429:
+                time.sleep(min(r.get("parameters", {}).get("retry_after", 1), 5))
+                continue
+            if r.get("error_code") in (400, 403):
+                redis("SREM", "users", uid)  # пользователь заблокировал бота
+            return False
+        return False
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        results = list(ex.map(one, users))
+    return results.count(True), results.count(False), results.count(None)
 
 
 def admin_state_step(user_id, chat_id, msg, state):
     text = (msg.get("text") or "").strip()
-    photo = msg["photo"][-1]["file_id"] if msg.get("photo") else None
-    done_kb = {
-        "inline_keyboard": [
-            [{"text": "⚙️ Админка", "callback_data": "adm"}],
-            [{"text": "🛍 Каталог", "callback_data": "cat"}],
-        ]
-    }
+    done_kb = {"inline_keyboard": [[{"text": "⚙️ Админка", "callback_data": "adm"}]]}
     cancel_kb = back_keyboard("adm", "⬅️ Отмена")
 
     if state == "bc_wait":
-        draft = {"chat": chat_id, "mid": msg["message_id"]}
-        save_json(f"dr:{user_id}", draft)
+        save_json(f"dr:{user_id}", {"chat": chat_id, "mid": msg["message_id"]})
         redis("DEL", f"st:{user_id}")
         total = redis("SCARD", "users") or 0
         tg("copyMessage", chat_id=chat_id, from_chat_id=chat_id, message_id=msg["message_id"])
@@ -368,6 +301,8 @@ def admin_state_step(user_id, chat_id, msg, state):
     if state == "btn_name":
         if not text:
             return send(chat_id, "Отправь название кнопки текстом.", cancel_kb)
+        if text in BUILTIN_BUTTONS:
+            return send(chat_id, "Такое название уже занято, придумай другое.", cancel_kb)
         save_json(f"dr:{user_id}", {"name": text[:40]})
         set_state(user_id, "btn_value", 1800)
         return send(
@@ -394,66 +329,8 @@ def admin_state_step(user_id, chat_id, msg, state):
         items.append({"id": bid, "name": draft.get("name", "Кнопка"), "kind": kind, "value": value})
         save_buttons(items)
         clear_state(user_id)
-        return send(chat_id, f"✅ Кнопка «{draft.get('name')}» добавлена в меню.", done_kb)
-
-    if state == "add_name":
-        if not text:
-            return send(chat_id, "Отправь название текстом.", cancel_kb)
-        save_json(f"dr:{user_id}", {"name": text})
-        set_state(user_id, "add_price", 1800)
-        return send(chat_id, "💰 Отправь цену, например: 500 ₽", cancel_kb)
-
-    if state == "add_price":
-        if not text:
-            return send(chat_id, "Отправь цену текстом.", cancel_kb)
-        draft = load_json(f"dr:{user_id}", {})
-        draft["price"] = text
-        save_json(f"dr:{user_id}", draft)
-        set_state(user_id, "add_desc", 1800)
-        return send(chat_id, "📝 Отправь описание товара (или «-», чтобы пропустить).", cancel_kb)
-
-    if state == "add_desc":
-        if not text:
-            return send(chat_id, "Отправь описание текстом или «-».", cancel_kb)
-        draft = load_json(f"dr:{user_id}", {})
-        draft["desc"] = "" if text == "-" else text
-        save_json(f"dr:{user_id}", draft)
-        set_state(user_id, "add_photo", 1800)
-        return send(chat_id, "🖼 Отправь фото товара (или «-», чтобы пропустить).", cancel_kb)
-
-    if state == "add_photo":
-        if not photo and text != "-":
-            return send(chat_id, "Отправь фото или «-».", cancel_kb)
-        draft = load_json(f"dr:{user_id}", {})
-        pid = redis("INCR", "catalog:next") or int(time.time())
-        draft.update({"id": pid, "photo": photo or ""})
-        items = get_catalog()
-        items.append(draft)
-        save_catalog(items)
-        clear_state(user_id)
-        return send(chat_id, f"✅ Товар «{draft['name']}» добавлен в каталог.", done_kb)
-
-    if state.startswith("edit:"):
-        _, pid, field = state.split(":")
-        items = get_catalog()
-        for p in items:
-            if str(p["id"]) == pid:
-                if field == "photo":
-                    if photo:
-                        p["photo"] = photo
-                    elif text == "-":
-                        p["photo"] = ""
-                    else:
-                        return send(chat_id, "Отправь фото или «-», чтобы убрать.", cancel_kb)
-                else:
-                    if not text:
-                        return send(chat_id, "Отправь новое значение текстом.", cancel_kb)
-                    p[field] = "" if (field == "desc" and text == "-") else text
-                save_catalog(items)
-                clear_state(user_id)
-                return send(chat_id, "✅ Изменено.", done_kb)
-        clear_state(user_id)
-        return send(chat_id, "Товар не найден.", done_kb)
+        send(chat_id, f"✅ Кнопка «{draft.get('name')}» добавлена.", done_kb)
+        return show_menu(chat_id, user_id)
 
 
 # ---------- Каналы пользователя ----------
@@ -480,7 +357,6 @@ def channels_screen(user_id):
                 [{"text": f"🗑 Удалить {c['title'][:25]}", "callback_data": f"del:{c['id']}"}]
             )
         text = "\n".join(lines)
-    keyboard.append([{"text": "⬅️ Назад", "callback_data": "menu"}])
     return text, {"inline_keyboard": keyboard}
 
 
@@ -538,6 +414,140 @@ def account_stats_text(user):
     return "\n".join(lines)
 
 
+# ---------- Рефералы ----------
+
+_bot_username = None
+
+
+def bot_username():
+    global _bot_username
+    if not _bot_username:
+        _bot_username = os.environ.get("BOT_USERNAME") or tg("getMe").get("result", {}).get("username")
+    return _bot_username
+
+
+def notify_admins(text):
+    for admin in ADMIN_IDS:
+        send(admin, text, html_mode=True)
+
+
+def user_label(u):
+    name = esc(" ".join(filter(None, [u.get("first_name"), u.get("last_name")])) or "—")
+    uname = f"@{esc(u['username'])}" if u.get("username") else "без username"
+    return f"{name} ({uname}), ID <code>{u['id']}</code>"
+
+
+def ref_count(uid):
+    return redis("SCARD", f"refs:{uid}") or 0
+
+
+def claimed_set(uid):
+    return {int(x) for x in (redis("SMEMBERS", f"claimed:{uid}") or [])}
+
+
+def capture_ref(user_id, text):
+    """Запоминает, кто пригласил нового пользователя (до проверки подписки)."""
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].startswith("ref_"):
+        return
+    try:
+        ref = int(parts[1][4:])
+    except ValueError:
+        return
+    if ref != user_id:
+        redis("SET", f"refp:{user_id}", ref, "EX", 2592000)
+
+
+def finalize_referral(user):
+    """Засчитывает реферала, когда человек прошёл подписку на каналы."""
+    if not REDIS_URL:
+        return
+    uid = user["id"]
+    ref = redis("GET", f"refp:{uid}")
+    if not ref:
+        return
+    redis("DEL", f"refp:{uid}")
+    ref = int(ref)
+    if redis("GET", f"ref_by:{uid}"):
+        return
+    redis("SET", f"ref_by:{uid}", ref)
+    redis("SADD", f"refs:{ref}", uid)
+    count = ref_count(ref)
+    ref_chat = tg("getChat", chat_id=ref).get("result") or {"id": ref}
+    ref_chat["id"] = ref
+
+    notify_admins(
+        "✅ <b>Реферал выполнил действия</b> (подписался на все каналы)\n\n"
+        f"Новый: {user_label(user)}\n"
+        f"Пригласил: {user_label(ref_chat)}\n"
+        f"Всего рефералов у пригласившего: <b>{count}</b>"
+    )
+    send(ref, f"👥 По твоей ссылке пришёл новый человек! Всего рефералов: {count}")
+    for need, reward in REWARDS:
+        if count == need:
+            send(
+                ref,
+                f"🎉 У тебя {need} рефералов!\nНаграда: {reward}\n\nХочешь забрать награду?",
+                {
+                    "inline_keyboard": [
+                        [{"text": "🎁 Забрать награду", "callback_data": f"claim:{need}"}],
+                        [{"text": "Позже", "callback_data": "ref"}],
+                    ]
+                },
+            )
+
+
+def referral_screen(uid):
+    if not REDIS_URL:
+        return "⚠️ База данных не подключена.", back_keyboard()
+    count = ref_count(uid)
+    done = claimed_set(uid)
+    link = f"https://t.me/{bot_username()}?start=ref_{uid}"
+    lines = [
+        "🎁 <b>Реферальная программа</b>\n",
+        "Приглашай друзей по своей ссылке. Человек засчитывается, когда подпишется на все каналы.\n",
+        f"🔗 Твоя ссылка:\n<code>{link}</code>\n",
+        f"👥 Приглашено: <b>{count}</b>\n",
+        "<b>Награды:</b>",
+    ]
+    kb = [[{"text": "📤 Поделиться ссылкой", "url": "https://t.me/share/url?url=" + link}]]
+    for need, reward in REWARDS:
+        if need in done:
+            status = "✅ получено"
+        elif count >= need:
+            status = "🎁 можно забрать"
+            kb.append([{"text": f"🎁 Забрать: {reward}"[:60], "callback_data": f"claim:{need}"}])
+        else:
+            status = f"🔒 ещё {need - count}"
+        lines.append(f"• {need} чел. — {esc(reward)}: {status}")
+    return "\n".join(lines), {"inline_keyboard": kb}
+
+
+def process_claim(user, chat_id, state, text):
+    uid = user["id"]
+    try:
+        need = int(state.split(":")[1])
+    except (IndexError, ValueError):
+        need = 0
+    reward = dict(REWARDS).get(need)
+    game_id = text.strip()
+    if not reward or ref_count(uid) < need or need in claimed_set(uid):
+        clear_state(uid)
+        return send(chat_id, "Эта награда недоступна.")
+    if len(game_id) > 40:
+        return send(chat_id, "Слишком длинно. Отправь только свой игровой ID.")
+    redis("SADD", f"claimed:{uid}", need)
+    clear_state(uid)
+    notify_admins(
+        "🎁 <b>Заявка на награду</b>\n\n"
+        f"Человек: {user_label(user)}\n"
+        f"Решил забрать награду за <b>{need}</b> рефералов\n"
+        f"Награда: {esc(reward)}\n"
+        f"Игровой ID: <code>{esc(game_id)}</code>"
+    )
+    send(chat_id, f"✅ Заявка отправлена! Админ свяжется с тобой.\nНаграда: {reward}\nИгровой ID: {game_id}")
+
+
 # ---------- Нейрочат ----------
 
 def ask_ai(text):
@@ -562,18 +572,66 @@ def ask_ai(text):
 
 # ---------- Обработчики ----------
 
+def handle_menu_button(user, chat_id, text):
+    """Нажатие кнопки возле клавиатуры. Возвращает True, если текст был кнопкой."""
+    uid = user["id"]
+    custom = {b["name"]: b for b in get_buttons()}
+    if text not in BUILTIN_BUTTONS and text not in custom:
+        return False
+    if text == BTN_ADM and not is_admin(uid):
+        return False
+
+    clear_state(uid)
+    if text == BTN_CH:
+        t, kb = channels_screen(uid)
+        send(chat_id, t, kb, html_mode=True)
+    elif text == BTN_REF:
+        t, kb = referral_screen(uid)
+        send(chat_id, t, kb, html_mode=True)
+    elif text == BTN_ACC:
+        send(chat_id, account_stats_text(user), html_mode=True)
+    elif text == BTN_SUP:
+        send(
+            chat_id,
+            "Если нужна помощь — обращайтесь и сообщите "
+            f'<a href="https://t.me/{SUPPORT_USERNAME}">@{SUPPORT_USERNAME}</a>',
+            html_mode=True,
+        )
+    elif text == BTN_TOP:
+        send(chat_id, "💰 Пополнение скоро будет доступно.")
+    elif text == BTN_AI:
+        send(chat_id, "🤖 Нейрочат включён. Просто напиши мне любое сообщение.")
+    elif text == BTN_ADM:
+        t, kb = admin_menu()
+        send(chat_id, t, kb, html_mode=True)
+    else:
+        b = custom[text]
+        if b["kind"] == "url":
+            send(chat_id, f"Открыть: {b['name']}", {"inline_keyboard": [[{"text": b["name"], "url": b["value"]}]]})
+        else:
+            send(chat_id, b["value"])
+    return True
+
+
 def handle_message(msg):
     chat_id = msg["chat"]["id"]
-    user_id = msg["from"]["id"]
+    user = msg["from"]
+    user_id = user["id"]
     text = msg.get("text", "")
-    track_user(user_id)
+    is_new = track_user(user_id)
+    if text.startswith("/start") and is_new:
+        capture_ref(user_id, text)
 
     if not_subscribed(user_id):
         return send_sub_request(chat_id)
+    finalize_referral(user)
 
     if text.startswith("/start") or text.startswith("/menu"):
         clear_state(user_id)
         return show_menu(chat_id, user_id)
+
+    if text and handle_menu_button(user, chat_id, text):
+        return
 
     state = get_state(user_id)
 
@@ -584,15 +642,13 @@ def handle_message(msg):
         return send(
             chat_id,
             answer,
-            {
-                "inline_keyboard": [
-                    [{"text": "📊 Мои каналы", "callback_data": "mych"}],
-                    [{"text": "⬅️ Назад", "callback_data": "menu"}],
-                ]
-            },
+            {"inline_keyboard": [[{"text": "📊 Мои каналы", "callback_data": "mych"}]]},
         )
 
-    if state and is_admin(user_id) and state.startswith(("add_", "edit:", "bc_", "btn_")):
+    if state and state.startswith("claim:") and text:
+        return process_claim(user, chat_id, state, text)
+
+    if state and is_admin(user_id) and state.startswith(("bc_", "btn_")):
         return admin_state_step(user_id, chat_id, msg, state)
 
     if not text:
@@ -600,10 +656,6 @@ def handle_message(msg):
 
     tg("sendChatAction", chat_id=chat_id, action="typing")
     send(chat_id, ask_ai(text))
-
-
-def send_sub_request(chat_id):
-    send(chat_id, "Чтобы пользоваться ботом, подпишись на все каналы 👇", sub_keyboard())
 
 
 def handle_callback(cb):
@@ -623,33 +675,36 @@ def handle_callback(cb):
         return
 
     tg("answerCallbackQuery", callback_query_id=cb["id"])
+    finalize_referral(cb["from"])
 
     # --- общее меню ---
     if data in ("check", "menu"):
         clear_state(user_id)
-        return show_menu(chat_id, user_id, cbm)
+        tg("deleteMessage", chat_id=chat_id, message_id=cbm["message_id"])
+        return show_menu(chat_id, user_id)
 
-    # --- каталог ---
-    if data == "cat":
-        text, kb = catalog_screen()
+    # --- рефералы ---
+    if data == "ref":
+        clear_state(user_id)
+        text, kb = referral_screen(user_id)
         return edit(cbm, text, kb, html_mode=True)
-    if data.startswith("p:"):
-        p = find_product(data[2:])
-        if not p:
-            text, kb = catalog_screen()
-            return edit(cbm, "Товар не найден.\n\n" + text, kb, html_mode=True)
-        text, kb = product_screen(p)
-        return edit(cbm, text, kb, html_mode=True, photo=p.get("photo") or None)
-
-    # --- пользовательские кнопки ---
-    if data.startswith("b:"):
-        for b in get_buttons():
-            if str(b["id"]) == data[2:]:
-                return edit(cbm, b["value"], back_keyboard())
-        return show_menu(chat_id, user_id, cbm)
+    if data.startswith("claim:"):
+        try:
+            need = int(data[6:])
+        except ValueError:
+            return
+        reward = dict(REWARDS).get(need)
+        if not reward or ref_count(user_id) < need or need in claimed_set(user_id):
+            return edit(cbm, "Эта награда недоступна.")
+        set_state(user_id, f"claim:{need}", 1800)
+        return edit(
+            cbm,
+            f"🎁 Награда: {reward}\n\nНапиши свой игровой ID одним сообщением.",
+            back_keyboard("ref", "⬅️ Отмена"),
+        )
 
     # --- админка ---
-    if data.startswith(("adm", "e:", "ef:", "d:", "dy:", "bc_", "bd:")):
+    if data.startswith(("adm", "bc_", "bd:")):
         if not is_admin(user_id):
             return
         if data == "adm":
@@ -681,7 +736,6 @@ def handle_callback(cb):
             text = (
                 "📈 <b>Статистика бота</b>\n\n"
                 f"👥 Пользователей: {users}\n"
-                f"🛍 Товаров в каталоге: {len(get_catalog())}\n"
                 f"🔘 Своих кнопок в меню: {len(get_buttons())}"
             )
             return edit(cbm, text, back_keyboard("adm"), html_mode=True)
@@ -691,69 +745,19 @@ def handle_callback(cb):
             for b in items:
                 rows.append([{"text": f"🗑 {b['name']}"[:50], "callback_data": f"bd:{b['id']}"}])
             rows.append([{"text": "⬅️ Назад", "callback_data": "adm"}])
-            text = "🔘 Кнопки главного меню. Нажми на кнопку, чтобы удалить её." if items else \
-                "🔘 Своих кнопок пока нет."
+            text = (
+                "🔘 Кнопки возле клавиатуры. Нажми на кнопку, чтобы удалить её."
+                if items
+                else "🔘 Своих кнопок пока нет."
+            )
             return edit(cbm, text, {"inline_keyboard": rows})
         if data == "adm_btn_add":
             set_state(user_id, "btn_name", 1800)
             return edit(cbm, "Отправь название новой кнопки.", back_keyboard("adm", "⬅️ Отмена"))
         if data.startswith("bd:"):
             save_buttons([b for b in get_buttons() if str(b["id"]) != data[3:]])
-            return edit(cbm, "✅ Кнопка удалена.", back_keyboard("adm_btn"))
-        if data == "adm_add":
-            set_state(user_id, "add_name", 1800)
-            return edit(
-                cbm,
-                "➕ <b>Новый товар</b>\n\nОтправь название товара.",
-                back_keyboard("adm", "⬅️ Отмена"),
-                html_mode=True,
-            )
-        if data == "adm_edit":
-            text, kb = product_picker("e", "✏️ Какой товар изменить?")
-            return edit(cbm, text, kb)
-        if data == "adm_del":
-            text, kb = product_picker("d", "🗑 Какой товар удалить?")
-            return edit(cbm, text, kb)
-        if data.startswith("e:"):
-            p = find_product(data[2:])
-            if not p:
-                return
-            pid = p["id"]
-            kb = {
-                "inline_keyboard": [
-                    [{"text": "Название", "callback_data": f"ef:{pid}:name"}],
-                    [{"text": "Цена", "callback_data": f"ef:{pid}:price"}],
-                    [{"text": "Описание", "callback_data": f"ef:{pid}:desc"}],
-                    [{"text": "Фото", "callback_data": f"ef:{pid}:photo"}],
-                    [{"text": "⬅️ Назад", "callback_data": "adm_edit"}],
-                ]
-            }
-            return edit(cbm, f"Что изменить у «{p['name']}»?", kb)
-        if data.startswith("ef:"):
-            _, pid, field = data.split(":")
-            set_state(user_id, f"edit:{pid}:{field}", 1800)
-            hint = " (или «-», чтобы убрать)" if field in ("photo", "desc") else ""
-            return edit(
-                cbm,
-                f"Отправь новое значение: {FIELD_NAMES[field]}{hint}.",
-                back_keyboard("adm", "⬅️ Отмена"),
-            )
-        if data.startswith("d:"):
-            p = find_product(data[2:])
-            if not p:
-                return
-            kb = {
-                "inline_keyboard": [
-                    [{"text": "✅ Да, удалить", "callback_data": f"dy:{p['id']}"}],
-                    [{"text": "⬅️ Отмена", "callback_data": "adm"}],
-                ]
-            }
-            return edit(cbm, f"Удалить «{p['name']}»?", kb)
-        if data.startswith("dy:"):
-            items = [p for p in get_catalog() if str(p["id"]) != data[3:]]
-            save_catalog(items)
-            text, kb = admin_menu()
-            return edit(cbm, "✅ Удалено.\n\n" + text, kb, html_mode=True)
+            send(chat_id, "✅ Кнопка удалена.", back_keyboard("adm_btn"))
+            return show_menu(chat_id, user_id)
         return
 
     # --- каналы пользователя ---
@@ -763,7 +767,7 @@ def handle_callback(cb):
         return edit(cbm, text, kb, html_mode=True)
     if data == "addch":
         if not REDIS_URL:
-            return edit(cbm, "⚠️ База данных не подключена.", back_keyboard())
+            return edit(cbm, "⚠️ База данных не подключена.")
         set_state(user_id, "add_channel")
         return edit(
             cbm,
@@ -780,21 +784,9 @@ def handle_callback(cb):
         text, kb = channels_screen(user_id)
         return edit(cbm, text, kb, html_mode=True)
 
-    # --- остальное ---
-    if data == "account":
-        return edit(cbm, account_stats_text(cb["from"]), back_keyboard(), html_mode=True)
-    if data == "support":
-        return edit(
-            cbm,
-            "Если нужна помощь — обращайтесь и сообщите "
-            f'<a href="https://t.me/{SUPPORT_USERNAME}">@{SUPPORT_USERNAME}</a>',
-            back_keyboard(),
-            html_mode=True,
-        )
-    if data == "topup":
-        return edit(cbm, "💰 Пополнение скоро будет доступно.", back_keyboard())
-    if data == "ai":
-        return edit(cbm, "🤖 Нейрочат включён. Просто напиши мне любое сообщение.", back_keyboard())
+    # Старые кнопки из прошлых версий: просто показываем меню
+    tg("deleteMessage", chat_id=chat_id, message_id=cbm["message_id"])
+    show_menu(chat_id, user_id)
 
 
 class handler(BaseHTTPRequestHandler):
