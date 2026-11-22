@@ -46,7 +46,6 @@ SUPPORT_USERNAME = "Supp0rtN0x"
 # Каналы, на которые нужно быть подписанным
 CHANNELS = [
     ("Clan Nox", "clannox"),
-    ("Shop Nox", "shoppnox"),
     ("Nox PUBG", "N0xPubg"),
 ]
 
@@ -172,6 +171,8 @@ def not_subscribed(user_id):
     missing = []
     for title, username in CHANNELS:
         r = tg("getChatMember", chat_id=f"@{username}", user_id=user_id)
+        if not r.get("ok") and "chat not found" in str(r.get("description", "")).lower():
+            continue  # канал удалён: не блокируем людей из-за него
         status = r.get("result", {}).get("status")
         if status not in ("member", "administrator", "creator"):
             missing.append((title, username))
